@@ -1,5 +1,18 @@
+import crypto from "crypto";
 import { cookies } from "next/headers";
-import { createHmac, timingSafeEqual } from "node:crypto";
-const key = process.env.SESSION_SECRET || "dev-only-session-secret-change-me";
-export function sign(value:string){return createHmac("sha256",key).update(value).digest("hex");}
-export async function currentUserId(){const store=await cookies();const raw=store.get("hy_session")?.value;if(!raw)return null;const [id,sig]=raw.split(".");if(!id||!sig)return null;const expected=sign(id);return timingSafeEqual(Buffer.from(sig),Buffer.from(expected))?id:null;}
+import { prisma } from "./db";
+
+const secret = () => process.env.AUTH_SECRET || "dev-secret-o'zgartiring";
+
+export function signSession(id: string) {
+  const sig = crypto.createHmac("sha256", secret()).update(id).digest("hex");
+  return `${id}.${sig}`;
+}
+
+export async function currentUser() {
+  const value = cookies().get("session")?.value;
+  if (!value) return null;
+  const id = value.split(".")[0];
+  if (signSession(id) !== value) return null;
+  return prisma.user.findUnique({ where: { id } });
+}

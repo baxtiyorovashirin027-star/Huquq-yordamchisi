@@ -1,3 +1,43 @@
-import {NextResponse} from "next/server";import OpenAI from "openai";import {z} from "zod";import {services} from "@/lib/services";
-const schema=z.object({message:z.string().trim().min(1).max(2000)});
-export async function POST(req:Request){try{const {message}=schema.parse(await req.json());if(process.env.OPENAI_API_KEY){const ai=new OpenAI({apiKey:process.env.OPENAI_API_KEY});const answer=await ai.chat.completions.create({model:process.env.OPENAI_MODEL||"gpt-4o-mini",messages:[{role:"system",content:"Siz O‘zbekiston aholisi uchun huquqiy yo‘l-yo‘riq beruvchi yordamchisiz. O‘zbek lotinida qisqa va tushunarli javob bering. Faqat umumiy maʼlumot ekanini ayting, qonunni to‘qimang va noaniqlikda rasmiy idoraga yo‘naltiring. Huquqshunos o‘rnini bosmaysiz."},{role:"user",content:message}],temperature:.3});return NextResponse.json({answer:answer.choices[0]?.message.content||"Savolingizni qayta yozib yuboring."})}const low=message.toLowerCase();const service=services.find(s=>s.title.toLowerCase().split(" ").some(w=>w.length>4&&low.includes(w)))||services[8];return NextResponse.json({answer:`${service.title} bo‘yicha: ${service.guidance}\n\nOdatda kerak bo‘ladigan hujjatlar: ${service.documents.join(", ")}. Holatingizga qarab ro‘yxat o‘zgarishi mumkin. Rasmiy talablarni ${service.organization}dan tekshiring. Demo rejimida AI API ulanmagan.`})}catch{return NextResponse.json({error:"Xabarni qayta yuboring."},{status:400})}}
+import { NextResponse } from "next/server";
+import { PDFDocument, StandardFonts } from "pdf-lib";
+import { currentUser } from "@/lib/auth";
+import { prisma } from "@/lib/db";
+import { sampleDraft } from "@/lib/ai";
+
+// Standart PDF shrifti o'zbek maxsus belgilarini bilmaydi, shuning uchun ularni oddiy belgiga almashtiramiz.
+const clean = (s: string) => s.replace(/[‘’ʻʼ`´]/g, "'").replace(/[•]/g, "-").replace(/[^\x20-\x7E\n]/g, "");
+
+export async function POST(req: Request) {
+  const user = await currentUser();
+  if (!user) return NextResponse.json({ error: "Avval tizimga kiring" }, { status: 401 });
+  const { title, body } = await req.json();
+  const text = (body && String(body).trim()) || sampleDraft(`${user.firstName} ${user.lastName}`);
+  const docTitle = String(title || "Ariza");
+
+  await prisma.application.create({
+    data: { number: String(Math.floor(10000 + Math.random() * 90000)), title: docTitle, body: text, userId: user.id },
+  });
+
+  const pdf = await PDFDocument.create();
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const size = 12, margin = 56, lh = 18;
+  let page = pdf.addPage([595, 842]);
+  let y = 842 - margin;
+  for (const para of clean(text).split("\n")) {
+    let line = "";
+    for (const word of para.split(" ")) {
+      const test = line ? `${line} ${word}` : word;
+      if (font.widthOfTextAtSize(test, size) > 595 - margin * 2) {
+        if (y < margin) { page = pdf.addPage([595, 842]); y = 842 - margin; }
+        page.drawText(line, { x: margin, y, size, font }); y -= lh; line = word;
+      } else line = test;
+    }
+    if (y < margin) { page = pdf.addPage([595, 842]); y = 842 - margin; }
+    page.drawText(line, { x: margin, y, size, font }); y -= lh;
+  }
+
+  const bytes = await pdf.save();
+  return new NextResponse(Buffer.from(bytes), {
+    headers: { "Content-Type": "application/pdf", "Content-Disposition": 'attachment; filename="ariza.pdf"' },
+  });
+}
